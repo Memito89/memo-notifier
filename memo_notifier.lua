@@ -1,569 +1,496 @@
 -- ============================================================================
---  MEMO NOTIFIER v1.0
+--  MEMO NOTIFIER v1.1
 --  A high-performance notification system for Steal a Brainrot
 --  Built by Guillermo (MemoAML)
 --  Discord: https://discord.gg/TITAN-GG
 -- ============================================================================
 
-local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
-local CoreGui = game:GetService("CoreGui")
+repeat task.wait() until game:IsLoaded()
+
+local Players      = game:GetService("Players")
+local HttpService  = game:GetService("HttpService")
+local CoreGui      = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
+local TeleportService = game:GetService("TeleportService")
+
+-- Destroy any previous instance
+if CoreGui:FindFirstChild("MemoNotifier_GUI") then
+	CoreGui.MemoNotifier_GUI:Destroy()
+end
 
 -- ============================================================================
 -- CONFIGURATION
 -- ============================================================================
 
 local CONFIG = {
-	-- Backend APIs
-	backends = {
-		primary = {
-			type = "websocket",
-			url = "wss://dexapi2.up.railway.app/ws",
-			enabled = false, -- Disabled: Delta does not support WebSocket
-		},
-		secondary = {
-			type = "firebase",
-			url = "https://autojoiner2-2d181-default-rtdb.firebaseio.com/logs.json",
-			enabled = true,
-		},
-	},
-
-	-- UI Settings
-	ui = {
-		theme = "dark",
-		soundEnabled = true,
-		soundId = "rbxassetid://4590662766",
-		toggleKey = Enum.KeyCode.RightControl,
-		updateInterval = 2,
-	},
-
-	-- Filter Settings
-	filters = {
-		autoJoin = false,
-		autoForce = false,
-		threshold = 10000000,
-		blacklist = {},
-	},
-
-	-- Display Settings
-	display = {
-		maxLogSize = 200,
-		logRetentionTime = 600, -- seconds
-		animationSpeed = 0.35,
-	},
+	threshold    = 10000000, -- $10M minimum to show
+	autoJoin     = false,
+	autoForce    = false,
+	soundEnabled = true,
+	soundId      = "rbxassetid://4590662766",
+	toggleKey    = Enum.KeyCode.RightControl,
+	pollInterval = 2,
+	maxLogs      = 200,
 }
 
 -- ============================================================================
 -- COLOR PALETTE
 -- ============================================================================
 
-local COLORS = {
-	-- Background
-	bg_dark = Color3.fromRGB(8, 11, 16),
-	bg_mid = Color3.fromRGB(12, 16, 24),
-	bg_card = Color3.fromRGB(18, 22, 32),
-
-	-- Accents
-	accent_primary = Color3.fromRGB(110, 80, 255), -- Dex Purple
-	accent_secondary = Color3.fromRGB(0, 180, 255), -- Neon Blue
-	accent_success = Color3.fromRGB(45, 210, 110),
-	accent_warning = Color3.fromRGB(255, 160, 30),
-	accent_danger = Color3.fromRGB(240, 70, 90),
-
-	-- Text
-	text_primary = Color3.fromRGB(245, 245, 250),
-	text_secondary = Color3.fromRGB(150, 160, 180),
-	text_muted = Color3.fromRGB(110, 120, 140),
-
-	-- Borders
-	border_normal = Color3.fromRGB(35, 40, 55),
-	border_hover = Color3.fromRGB(55, 65, 90),
+local C = {
+	bg        = Color3.fromRGB(8, 11, 16),
+	bg2       = Color3.fromRGB(14, 18, 28),
+	card      = Color3.fromRGB(20, 24, 36),
+	accent    = Color3.fromRGB(110, 80, 255),
+	blue      = Color3.fromRGB(0, 180, 255),
+	green     = Color3.fromRGB(45, 210, 110),
+	orange    = Color3.fromRGB(255, 160, 30),
+	red       = Color3.fromRGB(240, 70, 90),
+	white     = Color3.fromRGB(245, 245, 250),
+	grey      = Color3.fromRGB(150, 160, 180),
+	muted     = Color3.fromRGB(110, 120, 140),
+	stroke    = Color3.fromRGB(40, 46, 66),
 }
 
 -- ============================================================================
--- STATE MANAGEMENT
+-- STATE
 -- ============================================================================
 
 local STATE = {
-	isConnected = false,
-	connectionStatus = "Idle",
-	totalDetected = 0,
-	history = {},
-	users = {},
-	blacklist = {},
-	activeBackend = nil,
+	connected    = false,
+	detected     = 0,
+	history      = {},
+	seenIds      = {},
 }
 
 -- ============================================================================
--- UTILITY FUNCTIONS
+-- HELPERS
 -- ============================================================================
 
-local function formatNumber(num)
-	num = tonumber(num) or 0
-	if num >= 1e9 then
-		return string.format("%.1fB", num / 1e9):gsub("%.0B", "B")
-	elseif num >= 1e6 then
-		return string.format("%.1fM", num / 1e6):gsub("%.0M", "M")
-	elseif num >= 1e3 then
-		return string.format("%.1fK", num / 1e3):gsub("%.0K", "K")
+local function fmt(n)
+	n = tonumber(n) or 0
+	if n >= 1e12 then return string.format("$%.1fT/s", n/1e12):gsub("%.0T", "T")
+	elseif n >= 1e9  then return string.format("$%.1fB/s", n/1e9):gsub("%.0B", "B")
+	elseif n >= 1e6  then return string.format("$%.1fM/s", n/1e6):gsub("%.0M", "M")
+	elseif n >= 1e3  then return string.format("$%.1fK/s", n/1e3):gsub("%.0K", "K")
 	end
-	return tostring(math.floor(num))
+	return "$"..tostring(math.floor(n)).."/s"
 end
 
-local function getColorForValue(value)
-	value = tonumber(value) or 0
-	if value >= 1e12 then
-		return Color3.fromRGB(255, 130, 50)
-	elseif value >= 1e9 then
-		return Color3.fromRGB(255, 215, 0)
-	elseif value >= 300000000 then
-		return Color3.fromRGB(150, 90, 255)
-	elseif value >= 100000000 then
-		return Color3.fromRGB(255, 80, 80)
-	elseif value >= 50000000 then
-		return Color3.fromRGB(80, 180, 255)
-	elseif value >= 10000000 then
-		return Color3.fromRGB(50, 220, 120)
+local function colorFor(n)
+	n = tonumber(n) or 0
+	if n >= 1e12 then return Color3.fromRGB(255, 130, 50)
+	elseif n >= 1e9  then return Color3.fromRGB(255, 215, 0)
+	elseif n >= 3e8  then return Color3.fromRGB(150, 90, 255)
+	elseif n >= 1e8  then return Color3.fromRGB(255, 80, 80)
+	elseif n >= 5e7  then return Color3.fromRGB(80, 180, 255)
+	elseif n >= 1e7  then return Color3.fromRGB(50, 220, 120)
 	end
-	return COLORS.accent_secondary
+	return C.blue
 end
 
-local function playNotificationSound()
-	if not CONFIG.ui.soundEnabled then return end
-	
+local function tw(obj, props, t, style, dir)
+	TweenService:Create(obj,
+		TweenInfo.new(t or 0.3, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out),
+		props
+	):Play()
+end
+
+local function getHttp()
+	if syn and syn.request   then return syn.request   end
+	if http and http.request  then return http.request  end
+	if http_request           then return http_request  end
+	if request                then return request       end
+	return nil
+end
+
+local function doGet(url)
+	local fn = getHttp()
+	if fn then
+		local ok, res = pcall(fn, {
+			Url = url, Method = "GET",
+			Headers = { ["Cache-Control"] = "no-cache", ["User-Agent"] = "Mozilla/5.0" },
+		})
+		if ok and res and res.Body and res.Body ~= "" then
+			return res.Body
+		end
+	end
+	local ok, res = pcall(function() return game:HttpGet(url, true) end)
+	if ok and res and res ~= "" then return res end
+	return nil
+end
+
+local function playSound()
+	if not CONFIG.soundEnabled then return end
 	task.spawn(function()
 		pcall(function()
-			local sound = Instance.new("Sound")
-			sound.SoundId = CONFIG.ui.soundId
-			sound.Volume = 0.3
-			sound.Parent = SoundService
-			sound:Play()
-			game:GetService("Debris"):AddItem(sound, 2)
+			local s = Instance.new("Sound")
+			s.SoundId  = CONFIG.soundId
+			s.Volume   = 0.3
+			s.Parent   = SoundService
+			s:Play()
+			game:GetService("Debris"):AddItem(s, 3)
 		end)
 	end)
 end
 
 -- ============================================================================
--- UI CREATION
+-- UI SETUP
 -- ============================================================================
 
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "MemoNotifier_GUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.IgnoreGuiInset = true
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = CoreGui
+local gui = Instance.new("ScreenGui")
+gui.Name             = "MemoNotifier_GUI"
+gui.ResetOnSpawn     = false
+gui.IgnoreGuiInset   = true
+gui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
+gui.Parent           = CoreGui
 
-local function createLabel(parent, props)
-	local label = Instance.new("TextLabel")
-	label.BackgroundTransparency = 1
-	label.TextSize = props.size or 12
-	label.Font = props.font or Enum.Font.GothamMedium
-	label.TextColor3 = props.color or COLORS.text_primary
-	
-	for key, value in pairs(props) do
-		if key ~= "size" and key ~= "font" and key ~= "color" then
-			pcall(function()
-				label[key] = value
-			end)
-		end
-	end
-	
-	label.Parent = parent
-	return label
-end
-
-local function createFrame(parent, props)
-	local frame = Instance.new("Frame")
-	frame.BorderSizePixel = 0
-	frame.BackgroundColor3 = props.color or COLORS.bg_card
-	frame.BackgroundTransparency = props.transparency or 0.1
-	
-	for key, value in pairs(props) do
-		if key ~= "color" and key ~= "transparency" then
-			pcall(function()
-				frame[key] = value
-			end)
-		end
-	end
-	
-	frame.Parent = parent
-	return frame
-end
-
-local function tween(object, props, duration)
-	local tweenInfo = TweenInfo.new(
-		duration or CONFIG.display.animationSpeed,
-		Enum.EasingStyle.Quint,
-		Enum.EasingDirection.Out
-	)
-	local tween = TweenService:Create(object, tweenInfo, props)
-	tween:Play()
-	return tween
-end
-
--- ============================================================================
--- MAIN UI WINDOW
--- ============================================================================
-
-local MainFrame = createFrame(ScreenGui, {
-	Name = "MainFrame",
-	Size = UDim2.new(0, 680, 0, 440),
-	Position = UDim2.new(0.5, -340, 0.5, -220),
-	color = COLORS.bg_dark,
-	transparency = 0.15,
-	Active = true,
-	Draggable = true,
-	ClipsDescendants = true,
-})
-
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 16)
-Instance.new("UIStroke", MainFrame).Color = COLORS.accent_primary
-Instance.new("UIStroke", MainFrame).Transparency = 0.4
-Instance.new("UIStroke", MainFrame).Thickness = 1.5
+-- Main window
+local win = Instance.new("Frame")
+win.Name                  = "Window"
+win.Size                  = UDim2.new(0, 660, 0, 420)
+win.Position              = UDim2.new(0.5,-330, 0.5,-210)
+win.BackgroundColor3      = C.bg
+win.BackgroundTransparency = 0.08
+win.BorderSizePixel       = 0
+win.ClipsDescendants      = true
+win.Active                = true
+win.Draggable             = true
+win.Parent                = gui
+Instance.new("UICorner", win).CornerRadius = UDim.new(0,14)
+local winStroke = Instance.new("UIStroke", win)
+winStroke.Color       = C.accent
+winStroke.Thickness   = 1.5
+winStroke.Transparency = 0.35
 
 -- Header
-local HeaderFrame = createFrame(MainFrame, {
-	Size = UDim2.new(1, 0, 0, 60),
-	color = COLORS.bg_mid,
-})
+local header = Instance.new("Frame")
+header.Size             = UDim2.new(1,0,0,56)
+header.BackgroundColor3 = C.bg2
+header.BorderSizePixel  = 0
+header.Parent           = win
+Instance.new("UICorner", header).CornerRadius = UDim.new(0,14)
+-- cover bottom-rounded corners of header
+local hFill = Instance.new("Frame")
+hFill.Size             = UDim2.new(1,0,0,14)
+hFill.Position         = UDim2.new(0,0,1,-14)
+hFill.BackgroundColor3 = C.bg2
+hFill.BorderSizePixel  = 0
+hFill.Parent           = header
 
-createLabel(HeaderFrame, {
-	Text = "MEMO",
-	Size = 24,
-	Font = Enum.Font.GothamBold,
-	Color = COLORS.accent_primary,
-	Position = UDim2.new(0, 16, 0, 12),
-	TextXAlignment = Enum.TextXAlignment.Left,
-})
+-- Title
+local t1 = Instance.new("TextLabel")
+t1.Size                  = UDim2.new(0,60,1,0)
+t1.Position              = UDim2.new(0,16,0,0)
+t1.BackgroundTransparency = 1
+t1.Text                  = "MEMO"
+t1.TextSize              = 22
+t1.Font                  = Enum.Font.GothamBold
+t1.TextColor3            = C.accent
+t1.TextXAlignment        = Enum.TextXAlignment.Left
+t1.Parent                = header
 
-createLabel(HeaderFrame, {
-	Text = "NOTIFIER",
-	Size = 24,
-	Font = Enum.Font.GothamBold,
-	Color = COLORS.text_primary,
-	Position = UDim2.new(0, 90, 0, 12),
-	TextXAlignment = Enum.TextXAlignment.Left,
-})
+local t2 = Instance.new("TextLabel")
+t2.Size                  = UDim2.new(0,120,1,0)
+t2.Position              = UDim2.new(0,76,0,0)
+t2.BackgroundTransparency = 1
+t2.Text                  = "NOTIFIER"
+t2.TextSize              = 22
+t2.Font                  = Enum.Font.GothamBold
+t2.TextColor3            = C.white
+t2.TextXAlignment        = Enum.TextXAlignment.Left
+t2.Parent                = header
 
--- Status Indicator
-local StatusIndicator = createFrame(HeaderFrame, {
-	Size = UDim2.new(0, 8, 0, 8),
-	Position = UDim2.new(1, -24, 0, 26),
-	color = COLORS.accent_danger,
-	AnchorPoint = Vector2.new(1, 0.5),
-})
-Instance.new("UICorner", StatusIndicator).CornerRadius = UDim.new(1, 0)
+-- Status dot
+local dot = Instance.new("Frame")
+dot.Size             = UDim2.new(0,8,0,8)
+dot.Position         = UDim2.new(1,-16,0.5,-4)
+dot.BackgroundColor3 = C.red
+dot.BorderSizePixel  = 0
+dot.Parent           = header
+Instance.new("UICorner", dot).CornerRadius = UDim.new(1,0)
 
-local StatusLabel = createLabel(HeaderFrame, {
-	Text = "Disconnected",
-	Size = 11,
-	Color = COLORS.text_muted,
-	Position = UDim2.new(1, -120, 0, 20),
-	AnchorPoint = Vector2.new(1, 0),
-})
+-- Status label
+local statusLbl = Instance.new("TextLabel")
+statusLbl.Size                  = UDim2.new(0,140,0,20)
+statusLbl.Position              = UDim2.new(1,-158,0.5,-10)
+statusLbl.BackgroundTransparency = 1
+statusLbl.Text                  = "Disconnected"
+statusLbl.TextSize              = 11
+statusLbl.Font                  = Enum.Font.GothamMedium
+statusLbl.TextColor3            = C.muted
+statusLbl.TextXAlignment        = Enum.TextXAlignment.Right
+statusLbl.Parent                = header
+
+-- Detected count label
+local countLbl = Instance.new("TextLabel")
+countLbl.Size                  = UDim2.new(0,120,0,20)
+countLbl.Position              = UDim2.new(0,200,0.5,-10)
+countLbl.BackgroundTransparency = 1
+countLbl.Text                  = "0 detected"
+countLbl.TextSize              = 11
+countLbl.Font                  = Enum.Font.GothamMedium
+countLbl.TextColor3            = C.muted
+countLbl.TextXAlignment        = Enum.TextXAlignment.Left
+countLbl.Parent                = header
+
+-- Scroll area background
+local listBg = Instance.new("Frame")
+listBg.Size             = UDim2.new(1,-24,1,-72)
+listBg.Position         = UDim2.new(0,12,0,60)
+listBg.BackgroundColor3 = C.bg2
+listBg.BackgroundTransparency = 0.4
+listBg.BorderSizePixel  = 0
+listBg.Parent           = win
+Instance.new("UICorner", listBg).CornerRadius = UDim.new(0,10)
+local listStroke = Instance.new("UIStroke", listBg)
+listStroke.Color       = C.stroke
+listStroke.Thickness   = 1
+listStroke.Transparency = 0.4
+
+-- ScrollingFrame
+local scroll = Instance.new("ScrollingFrame")
+scroll.Size                  = UDim2.new(1,-8,1,-8)
+scroll.Position              = UDim2.new(0,4,0,4)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel       = 0
+scroll.ScrollBarThickness    = 3
+scroll.ScrollBarImageColor3  = C.accent
+scroll.CanvasSize            = UDim2.new(0,0,0,0)
+scroll.AutomaticCanvasSize   = Enum.AutomaticSize.Y
+scroll.Parent                = listBg
+
+local list = Instance.new("UIListLayout", scroll)
+list.Padding         = UDim.new(0,6)
+list.SortOrder       = Enum.SortOrder.LayoutOrder
+local pad = Instance.new("UIPadding", scroll)
+pad.PaddingTop    = UDim.new(0,6)
+pad.PaddingBottom = UDim.new(0,6)
+pad.PaddingLeft   = UDim.new(0,4)
+pad.PaddingRight  = UDim.new(0,4)
 
 -- ============================================================================
--- LOGS SECTION
+-- LOG ENTRY
 -- ============================================================================
 
-local LogsFrame = createFrame(MainFrame, {
-	Size = UDim2.new(1, -32, 1, -92),
-	Position = UDim2.new(0, 16, 0, 76),
-	color = COLORS.bg_mid,
-	transparency = 0.3,
-})
-Instance.new("UICorner", LogsFrame).CornerRadius = UDim.new(0, 12)
+local layoutOrder = 0
 
-local ScrollingFrame = Instance.new("ScrollingFrame")
-ScrollingFrame.Size = UDim2.new(1, 0, 1, 0)
-ScrollingFrame.BackgroundTransparency = 1
-ScrollingFrame.BorderSizePixel = 0
-ScrollingFrame.ScrollBarThickness = 4
-ScrollingFrame.ScrollBarImageColor3 = COLORS.accent_primary
-ScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-ScrollingFrame.Parent = LogsFrame
+local function addLog(data)
+	layoutOrder -= 1 -- newest on top
 
-local UIListLayout = Instance.new("UIListLayout")
-UIListLayout.Padding = UDim.new(0, 8)
-UIListLayout.Parent = ScrollingFrame
+	local color = colorFor(data.value)
 
-Instance.new("UIPadding", ScrollingFrame).PaddingTop = UDim.new(0, 8)
+	local card = Instance.new("Frame")
+	card.Name             = "LogCard"
+	card.Size             = UDim2.new(1,0,0,54)
+	card.BackgroundColor3 = C.card
+	card.BackgroundTransparency = 0.25
+	card.BorderSizePixel  = 0
+	card.LayoutOrder      = layoutOrder
+	card.Parent           = scroll
+	Instance.new("UICorner", card).CornerRadius = UDim.new(0,8)
+	local cs = Instance.new("UIStroke", card)
+	cs.Color       = color
+	cs.Thickness   = 1
+	cs.Transparency = 0.6
 
--- ============================================================================
--- FOOTER
--- ============================================================================
+	-- Side accent bar
+	local bar = Instance.new("Frame")
+	bar.Size             = UDim2.new(0,4,1,-12)
+	bar.Position         = UDim2.new(0,6,0,6)
+	bar.BackgroundColor3 = color
+	bar.BorderSizePixel  = 0
+	bar.Parent           = card
+	Instance.new("UICorner", bar).CornerRadius = UDim.new(1,0)
 
-local FooterFrame = createFrame(MainFrame, {
-	Size = UDim2.new(1, 0, 0, 32),
-	Position = UDim2.new(0, 0, 1, -32),
-	color = COLORS.bg_dark,
-})
+	-- Name
+	local name = Instance.new("TextLabel")
+	name.Size                  = UDim2.new(1,-170,0,20)
+	name.Position              = UDim2.new(0,18,0,8)
+	name.BackgroundTransparency = 1
+	name.Text                  = data.name or "Unknown"
+	name.TextSize              = 13
+	name.Font                  = Enum.Font.GothamBold
+	name.TextColor3            = C.white
+	name.TextXAlignment        = Enum.TextXAlignment.Left
+	name.TextTruncate          = Enum.TextTruncate.AtEnd
+	name.Parent                = card
 
-createLabel(FooterFrame, {
-	Text = "Detected: 0",
-	Size = 11,
-	Color = COLORS.text_muted,
-	Position = UDim2.new(0, 16, 0, 8),
-	AnchorPoint = Vector2.new(0, 0.5),
-})
+	-- Value
+	local val = Instance.new("TextLabel")
+	val.Size                  = UDim2.new(1,-170,0,16)
+	val.Position              = UDim2.new(0,18,0,29)
+	val.BackgroundTransparency = 1
+	val.Text                  = fmt(data.value) .. (data.players and ("  •  " .. data.players .. " players") or "")
+	val.TextSize              = 11
+	val.Font                  = Enum.Font.GothamMedium
+	val.TextColor3            = color
+	val.TextXAlignment        = Enum.TextXAlignment.Left
+	val.Parent                = card
 
--- ============================================================================
--- LOG ENTRY CREATION
--- ============================================================================
+	-- JOIN button
+	local joinBtn = Instance.new("TextButton")
+	joinBtn.Size             = UDim2.new(0,46,0,22)
+	joinBtn.Position         = UDim2.new(1,-56,0.5,-11)
+	joinBtn.BackgroundColor3 = C.accent
+	joinBtn.Text             = "JOIN"
+	joinBtn.TextSize         = 10
+	joinBtn.Font             = Enum.Font.GothamBold
+	joinBtn.TextColor3       = Color3.new(1,1,1)
+	joinBtn.AutoButtonColor  = false
+	joinBtn.Parent           = card
+	Instance.new("UICorner", joinBtn).CornerRadius = UDim.new(0,6)
 
-local function createLogEntry(data)
-	local entryFrame = createFrame(ScrollingFrame, {
-		Size = UDim2.new(1, -8, 0, 60),
-		color = getColorForValue(data.value),
-		transparency = 0.8,
-	})
-	Instance.new("UICorner", entryFrame).CornerRadius = UDim.new(0, 8)
-
-	local nameLabel = createLabel(entryFrame, {
-		Text = data.name or "Unknown",
-		Size = 14,
-		Font = Enum.Font.GothamBold,
-		Color = COLORS.text_primary,
-		Position = UDim2.new(0, 12, 0, 6),
-		Size = UDim2.new(1, -24, 0, 18),
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-	})
-
-	createLabel(entryFrame, {
-		Text = "$" .. formatNumber(data.value) .. "/s",
-		Size = 12,
-		Font = Enum.Font.GothamBold,
-		Color = getColorForValue(data.value),
-		Position = UDim2.new(0, 12, 0, 26),
-		Size = UDim2.new(0.5, 0, 0, 16),
-		TextXAlignment = Enum.TextXAlignment.Left,
-	})
-
-	if data.players then
-		createLabel(entryFrame, {
-			Text = "Players: " .. tostring(data.players),
-			Size = 10,
-			Color = COLORS.text_muted,
-			Position = UDim2.new(0, 12, 0, 44),
-			Size = UDim2.new(0.5, 0, 0, 12),
-			TextXAlignment = Enum.TextXAlignment.Left,
-		})
-	end
-
-	-- Join Button
-	local joinButton = Instance.new("TextButton")
-	joinButton.Size = UDim2.new(0, 50, 0, 24)
-	joinButton.Position = UDim2.new(1, -60, 0.5, -12)
-	joinButton.AnchorPoint = Vector2.new(1, 0.5)
-	joinButton.BackgroundColor3 = COLORS.accent_primary
-	joinButton.TextColor3 = Color3.fromRGB(0, 0, 0)
-	joinButton.TextSize = 10
-	joinButton.Font = Enum.Font.GothamBold
-	joinButton.Text = "JOIN"
-	joinButton.Parent = entryFrame
-	Instance.new("UICorner", joinButton).CornerRadius = UDim.new(0, 6)
-
-	joinButton.MouseButton1Click:Connect(function()
-		if data.jobId then
-			pcall(function()
-				game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, data.jobId)
-			end)
-		end
+	joinBtn.MouseButton1Click:Connect(function()
+		pcall(function()
+			TeleportService:TeleportToPlaceInstance(game.PlaceId, data.jobId)
+		end)
 	end)
 
-	tween(entryFrame, { Size = UDim2.new(1, -8, 0, 60) }, 0.3)
+	joinBtn.MouseEnter:Connect(function()
+		tw(joinBtn, { BackgroundColor3 = Color3.fromRGB(140,110,255) })
+	end)
+	joinBtn.MouseLeave:Connect(function()
+		tw(joinBtn, { BackgroundColor3 = C.accent })
+	end)
 
-	table.insert(STATE.history, {
-		frame = entryFrame,
-		data = data,
-		createdAt = tick(),
-	})
+	-- Animate in
+	card.Size = UDim2.new(1,0,0,0)
+	card.BackgroundTransparency = 1
+	tw(card, { Size = UDim2.new(1,0,0,54), BackgroundTransparency = 0.25 }, 0.35, Enum.EasingStyle.Back)
 
-	if #STATE.history > CONFIG.display.maxLogSize then
-		local old = table.remove(STATE.history, 1)
-		if old.frame and old.frame.Parent then
-			old.frame:Destroy()
-		end
+	-- Track
+	STATE.detected += 1
+	countLbl.Text = STATE.detected .. " detected"
+	table.insert(STATE.history, 1, { card = card, data = data })
+
+	-- Trim old
+	if #STATE.history > CONFIG.maxLogs then
+		local old = table.remove(STATE.history)
+		if old.card and old.card.Parent then old.card:Destroy() end
 	end
 
-	STATE.totalDetected = STATE.totalDetected + 1
-	FooterFrame:FindFirstChild("TextLabel").Text = "Detected: " .. STATE.totalDetected
-
-	playNotificationSound()
+	playSound()
 end
 
 -- ============================================================================
--- BACKEND MANAGEMENT
+-- STATUS HELPERS
 -- ============================================================================
 
-local BackendManager = {}
-
-function BackendManager:connectWebSocket()
-	local success = false
-	task.spawn(function()
-		while CONFIG.backends.primary.enabled and not success do
-			pcall(function()
-				local ws = syn and syn.websocket or nil
-				if not ws then
-					warn("[MemoNotifier] WebSocket not available")
-					return
-				end
-
-				local client = ws.connect(CONFIG.backends.primary.url)
-				
-				client.OnMessage:Connect(function(msg)
-					pcall(function()
-						local parts = msg:split("|")
-						if #parts >= 3 then
-							createLogEntry({
-								name = parts[1],
-								value = tonumber(parts[2]) or 0,
-								players = parts[3] or "?",
-								jobId = parts[4] or "",
-							})
-						end
-					end)
-				end)
-
-				client.OnClose:Connect(function()
-					STATE.isConnected = false
-					StatusIndicator.BackgroundColor3 = COLORS.accent_danger
-					StatusLabel.Text = "Reconnecting..."
-					success = false
-				end)
-
-				STATE.isConnected = true
-				STATE.activeBackend = "WebSocket"
-				StatusIndicator.BackgroundColor3 = COLORS.accent_success
-				StatusLabel.Text = "Connected (WS)"
-				success = true
-			end)
-
-			if not success then
-				task.wait(5)
-			end
-		end
-	end)
-end
-
-function BackendManager:connectFirebase()
-	task.spawn(function()
-		local lastFetch = 0
-		while CONFIG.backends.secondary.enabled do
-			pcall(function()
-				local now = tick()
-				if now - lastFetch < CONFIG.ui.updateInterval then
-					task.wait(CONFIG.ui.updateInterval)
-					return
-				end
-
-				local url = CONFIG.backends.secondary.url .. "?orderBy=\"timestamp\"&limitToLast=30&t=" .. tostring(now)
-				local response = game:HttpGet(url, true)
-				lastFetch = now
-
-				if response then
-					local data = HttpService:JSONDecode(response)
-					if data and type(data) == "table" then
-						for k, v in pairs(data) do
-							if type(v) == "table" and v.jobId then
-								createLogEntry({
-									name = v.name or "Unknown",
-									value = tonumber(v.numValue) or 0,
-									players = v.players or "?",
-									jobId = v.jobId,
-								})
-							end
-						end
-					end
-				end
-			end)
-
-			task.wait(CONFIG.ui.updateInterval)
-		end
-	end)
+local function setStatus(text, color)
+	statusLbl.Text   = text
+	statusLbl.TextColor3 = color or C.muted
+	dot.BackgroundColor3 = color or C.red
+	STATE.connected  = (color == C.green)
 end
 
 -- ============================================================================
--- INITIALIZATION
+-- BACKEND: DEX API (HTTP poll — works on Delta)
 -- ============================================================================
 
-local function initialize()
-	-- Load config from file if available
-	pcall(function()
-		if isfile and readfile and isfile("MemoNotifier_Config.json") then
-			local saved = HttpService:JSONDecode(readfile("MemoNotifier_Config.json"))
-			if type(saved) == "table" then
-				for k, v in pairs(saved) do
-					if type(CONFIG[k]) == "table" then
-						for k2, v2 in pairs(v) do
-							CONFIG[k][k2] = v2
-						end
-					else
-						CONFIG[k] = v
-					end
-				end
-			end
-		end
-	end)
-
-	-- Save config periodically
-	task.spawn(function()
-		while true do
-			task.wait(10)
-			pcall(function()
-				if writefile then
-					writefile("MemoNotifier_Config.json", HttpService:JSONEncode(CONFIG))
-				end
-			end)
-		end
-	end)
-
-	-- Connect backends
-	if CONFIG.backends.primary.enabled then
-		BackendManager:connectWebSocket()
-	end
-	if CONFIG.backends.secondary.enabled then
-		BackendManager:connectFirebase()
-	end
-
-	-- Toggle keybind
-	UserInputService.InputBegan:Connect(function(input, gameProcessed)
-		if gameProcessed then return end
-		if input.KeyCode == CONFIG.ui.toggleKey then
-			local visible = MainFrame.Visible
-			MainFrame.Visible = not visible
-		end
-	end)
-
-	print("[MemoNotifier] Initialized successfully!")
-end
-
-initialize()
-
--- Cleanup old logs periodically
 task.spawn(function()
+	local DEX_URL = "https://dexapi1.up.railway.app/logs"
+
 	while true do
-		task.wait(30)
-		local now = tick()
-		for i = #STATE.history, 1, -1 do
-			if now - STATE.history[i].createdAt > CONFIG.display.logRetentionTime then
-				if STATE.history[i].frame then
-					STATE.history[i].frame:Destroy()
-				end
-				table.remove(STATE.history, i)
+		local ok = pcall(function()
+			local body = doGet(DEX_URL .. "?t=" .. tostring(tick()))
+			if not body or body == "" then
+				setStatus("No data (DEX)", C.orange)
+				return
 			end
+
+			-- Each line: name|mps|players|jobId
+			for line in body:gmatch("[^\r\n]+") do
+				local parts = line:split("|")
+				if #parts >= 2 then
+					local name   = (parts[1] or ""):match("^%s*(.-)%s*$")
+					local value  = tonumber(parts[2]) or 0
+					local players = parts[3] or "?"
+					local jobId  = parts[4] or ""
+					local uid    = name .. "|" .. jobId
+
+					if name ~= "" and value >= CONFIG.threshold and not STATE.seenIds[uid] then
+						STATE.seenIds[uid] = true
+						task.delay(300, function() STATE.seenIds[uid] = nil end)
+						setStatus("Connected (DEX)", C.green)
+						addLog({ name = name, value = value, players = players, jobId = jobId })
+
+						if CONFIG.autoJoin and jobId ~= "" then
+							pcall(function()
+								TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId)
+							end)
+						end
+					end
+				end
+			end
+
+			setStatus("Connected (DEX)", C.green)
+		end)
+
+		if not ok then
+			setStatus("DEX error — retrying", C.red)
 		end
+
+		task.wait(CONFIG.pollInterval)
 	end
 end)
 
-return {
-	CONFIG = CONFIG,
-	STATE = STATE,
-	createLogEntry = createLogEntry,
-}
+-- ============================================================================
+-- BACKEND: Firebase (secondary)
+-- ============================================================================
+
+task.spawn(function()
+	local FB_URL = "https://autojoiner2-2d181-default-rtdb.firebaseio.com/logs.json"
+
+	while true do
+		pcall(function()
+			local body = doGet(FB_URL .. "?orderBy=%22%24key%22&limitToLast=30&t=" .. tostring(tick()))
+			if not body or body == "" then return end
+
+			local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
+			if not ok2 or type(data) ~= "table" then return end
+
+			for k, v in pairs(data) do
+				if type(v) == "table" and v.jobId then
+					local name  = tostring(v.name or "Unknown")
+					local value = tonumber(v.numValue) or 0
+					local jobId = tostring(v.jobId)
+					local uid   = k -- Firebase key is unique
+
+					if value >= CONFIG.threshold and not STATE.seenIds[uid] then
+						STATE.seenIds[uid] = true
+						task.delay(300, function() STATE.seenIds[uid] = nil end)
+
+						if not STATE.connected then
+							setStatus("Connected (FB)", C.green)
+						end
+
+						addLog({
+							name    = name,
+							value   = value,
+							players = tostring(v.players or "?"),
+							jobId   = jobId,
+						})
+					end
+				end
+			end
+		end)
+
+		task.wait(CONFIG.pollInterval)
+	end
+end)
+
+-- ============================================================================
+-- TOGGLE KEYBIND
+-- ============================================================================
+
+UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode == CONFIG.toggleKey then
+		win.Visible = not win.Visible
+	end
+end)
+
+print("[MemoNotifier] Loaded! Press RightControl to toggle.")
