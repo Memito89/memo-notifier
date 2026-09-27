@@ -23,7 +23,7 @@ local CONFIG = {
 		primary = {
 			type = "websocket",
 			url = "wss://dexapi2.up.railway.app/ws",
-			enabled = true,
+			enabled = false, -- Disabled: Delta does not support WebSocket
 		},
 		secondary = {
 			type = "firebase",
